@@ -1,0 +1,157 @@
+from machine import Pin, ADC, PWM
+import time  # Importa librería para usar retardos y tiempos
+
+#     CONFIGURACIÓN 
+# Potenciómetros
+pot_base = ADC(Pin(34))    # Configura pin 34 como entrada analógica (ADC) para potenciómetro base
+pot_brazo = ADC(Pin(35))   # Configura pin 35 como entrada analógica (ADC) para potenciómetro brazo
+
+pot_base.atten(ADC.ATTN_11DB) # Ajusta rango de medida del ADC (0 - ~3.6V)
+pot_base.width(ADC.WIDTH_12BIT)     # Resolución de 12 bits (0 - 4095)
+
+pot_brazo.atten(ADC.ATTN_11DB) # Ajusta rango de medida del ADC (0 - ~3.6V)
+pot_brazo.width(ADC.WIDTH_10BIT)  # Resolución de 10 bits 0-1023
+
+# Servos
+servo_base = PWM(Pin(18), freq=50)    # Servo base en pin 18 con señal PWM a 50 Hz
+servo_brazo = PWM(Pin(19), freq=50)    # Servo base en pin 19 con señal PWM a 50 Hz
+
+# LEDs
+led_amarillo = Pin(2, Pin.OUT)   # Modo manual
+led_rojo = Pin(4, Pin.OUT)    # Modo automático
+
+# Buzzer8
+buzzer = Pin(5, Pin.OUT)  
+
+# Botones
+btn_retorno = Pin(12, Pin.IN, Pin.PULL_DOWN)     # Retorno automático
+btn_secuencia = Pin(14, Pin.IN, Pin.PULL_DOWN)   # Secuencia automática 
+
+# ---------------- VARIABLES GLOBALES ----------------
+modo_secuencia = False   # Flag para activar secuencia 
+modo_retorno = False     # Flag para activar retorno 
+
+
+# ---------------- FUNCIONES ----------------
+def mapear(valor, in_min, in_max, out_min, out_max):
+     # Convierte un rango de valores en otro 
+    return int((valor - in_min) * (out_max - out_min) / (in_max - in_min) + out_min)
+      #calcula y entrega el resultado en Z
+
+
+def mover_servos_manual():
+    "*****Modo manual: usuario controla los servos*****"
+    val_base = pot_base.read()   # Lee valor ADC potenciómetro base
+    val_brazo = pot_brazo.read() # Lee valor ADC potenciómetro brazo
+    
+    duty_base = mapear(val_base, 0, 4095, 40, 115) # Mapea valor a duty del servo base
+    duty_brazo = mapear(val_brazo, 0, 1023, 40, 115) # Mapea valor a duty del servo brazo
+    
+    servo_base.duty(duty_base)  # Mueve servo base
+    servo_brazo.duty(duty_brazo)  ## Mueve servo base
+
+
+def mover_a_posicion(servo, duty_actual, duty_final, paso=1, delay=0.02):
+     # Si la posición final es mayor que la actual : mover hacia adelante
+    "Mover servo gradualmente"
+    if duty_actual < duty_final:
+        # Recorre desde la posición actual hasta la final en pasos positivos
+        for d in range(duty_actual, duty_final, paso):
+            servo.duty(d) # Mueve el servo a la posición d
+            time.sleep(delay) # Espera un poco para suavizar el movimiento
+    else:
+        for d in range(duty_actual, duty_final, -paso):
+            #si el duty final es menor hay que retroceder
+            # resta en lugar de sumar, obviamente jajajajaja
+            servo.duty(d)  # Mueve el servo a la posición d
+            time.sleep(delay)   # Espera un poco en cada paso
+
+
+def retorno_a_inicial():
+    "*****Modo 2: Retorno automático*****"
+    print("Retorno automático activado")
+    led_amarillo.value(0) # Apaga LED amarillo (modo manual OFF)
+    led_rojo.value(1)   # Enciende LED rojo (modo automático ON)
+    buzzer.value(1)  # Activa buzzer como señal de aviso
+
+    pos_base = servo_base.duty()        # Lee y guarda la posición actual del servo base
+    pos_brazo = servo_brazo.duty()       # Lee y guarda la posición actual del servo brazo
+
+    pos_base_inicial = 77    # Duty de referencia: base centrada aprox. 90°
+    pos_brazo_inicial = 40   # Duty de referencia: brazo en posición baja aprox. 0°
+
+    mover_a_posicion(servo_base, pos_base, pos_base_inicial)   # Mueve servo base suavemente a la posición inicial
+    mover_a_posicion(servo_brazo, pos_brazo, pos_brazo_inicial) # Mueve servo brazo suavemente a la posición inicial
+
+    buzzer.value(0)        # Apaga buzzer (retorno completado)
+    led_rojo.value(0)      # Apaga LED rojo (modo automático OFF)
+    led_amarillo.value(1)  # Enciende LED amarillo (vuelve al modo manual)
+    print("Retorno completado, modo manual activo")  
+    
+    def mover_a(duty_base, duty_brazo, delay=0.5):
+    """Mover ambos servos a posiciones específicas"""
+
+    servo_base.duty(duty_base)   # Lleva el servo de la base al duty indicado (posición)
+    servo_brazo.duty(duty_brazo) # Lleva el servo del brazo al duty indicado (posición)
+    time.sleep(delay)            # Espera (por defecto 0.5 seg) para que los servos completen el movimiento
+
+
+def secuencia():
+    """Modo 3: Secuencia automática"""
+    print("Secuencia automática iniciada")  
+    led_amarillo.value(0)   # Apaga LED amarillo (sale del modo manual)
+    led_rojo.value(1)       # Enciende LED rojo (modo automático activo)
+    buzzer.value(1)         # Activa buzzer para indicar inicio
+
+    mover_a(40, 40, 1)      # Mueve base a la izquierda y brazo hacia abajo con 1s de espera entre mov.
+    mover_a(115, 40, 1)     # Mueve base a la derecha y brazo sigue abajo
+    mover_a(115, 100, 1)    # Base a la derecha y brazo hacia arriba
+    mover_a(40, 100, 1)     # Base a la izquierda y brazo sigue arriba
+    mover_a(77, 40, 1)      # Regresa a la posición inicial (centro base, brazo abajo)
+
+    buzzer.value(0)         # Apaga buzzer (secuencia terminada)
+    led_rojo.value(0)       # Apaga LED rojo (sale de modo automático)
+    led_amarillo.value(1)   # Enciende LED amarillo (vuelve a modo manual)
+    print("Secuencia finalizada, vuelve a modo manual") 
+
+
+#  INTERRUPCIONES 
+
+def activar_retorno(pin):
+    global modo_retorno        # Permite modificar la variable global dentro de la función
+    modo_retorno = True        # Activa el modo retorno automático
+
+def activar_secuencia(pin):
+    global modo_secuencia      # Permite modificar la variable global dentro de la función
+    modo_secuencia = True      # Activa el modo secuencia automática
+
+
+# ---------------- PROGRAMA PRINCIPAL ----------------
+def main():
+    global modo_retorno, modo_secuencia   # Para poder modificar las banderas globales dentro de main
+
+    print("Sistema de grúa robótica iniciado (Modos 1, 2 y 3 listos)")  
+    led_amarillo.value(1)   # LED amarillo encendido → empieza en modo manual
+    led_rojo.value(0)       # LED rojo apagado
+    buzzer.value(0)         # Buzzer apagado
+
+    # Configurar interrupciones en botones
+    btn_retorno.irq(trigger=Pin.IRQ_RISING, handler=activar_retorno)     # Cuando se presiona el botón de retorno, llama a activar_retorno()
+    btn_secuencia.irq(trigger=Pin.IRQ_RISING, handler=activar_secuencia) # Cuando se presiona el botón de secuencia, llama a activar_secuencia()
+
+    # Bucle principal
+    while True:
+        if modo_retorno:                  # Si la bandera de retorno está activa
+            retorno_a_inicial()           # Ejecuta retorno automático
+            modo_retorno = False          # Reinicia bandera
+        elif modo_secuencia:              # Si la bandera de secuencia está activa
+            secuencia()                   # Ejecuta SECUENCIA automática
+            modo_secuencia = False        # Reinicia bandera
+        else:
+            mover_servos_manual()         # Si no hay interrupciones, controla servos con potenciómetros (manual)
+        
+        time.sleep(0.05)                  # Pausa corta para evitar sobrecargar el microcontrolador
+
+
+# Ejecutar
+main()    # Llama a la función principal
