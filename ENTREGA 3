@@ -1,0 +1,105 @@
+from machine import Pin, Timer      # Importa las clases Pin (para controlar GPIO) y Timer (para interrupciones periódicas)
+import time, random                 # Importa librerías estándar para manejar tiempos y generar números aleatorios
+
+#  CONFIGURACIÓN 
+LED_PIN = 2                         # Pin GPIO donde está conectado el LED indicador
+SAMPLE_RATE = 250                   # Frecuencia de muestreo en Hz (250 muestras por segundo, típico en EMG)
+MOVING_WINDOW = 5                   # Tamaño de la ventana del filtro de media móvil
+MEDIAN_WINDOW = 5                   # Tamaño de la ventana del filtro de mediana
+IIR_ALPHA = 0.15                    # Coeficiente de suavizado del filtro IIR (más bajo = más suavizado)
+
+# SETUP 
+led = Pin(LED_PIN, Pin.OUT)         # Configura el pin del LED como salida digital
+led.value(0)                        # Apaga el LED al inicio
+
+# Buffers y variables
+mov_buf = [0]*MOVING_WINDOW         # Buffer circular para el filtro de media móvil
+mov_sum = 0                         # Suma acumulada para el cálculo de promedio
+mov_pos = 0                         # Posición actual en el buffer circular
+mov_count = 0                       # Contador de elementos válidos en el buffer
+med_buf = []                        # Lista para almacenar muestras del filtro de mediana
+iir_prev = None                     # Último valor filtrado del filtro IIR (inicialmente vacío)
+
+new_sample = 0                      # Variable para almacenar la muestra nueva
+data_ready = False                  # Bandera que indica si hay una nueva muestra lista
+
+# SIMULACIÓN DE EMG 
+def fake_emg():                     # Función que genera una señal EMG simulada
+    base_noise = random.randint(-80, 80)     # Ruido eléctrico de fondo (pequeñas variaciones)
+    burst = 0                                 # Valor inicial sin actividad muscular
+    if random.random() > 0.97:                # Aproximadamente un 3% de probabilidad de contracción muscular
+        burst = random.randint(200, 900)      # Pico de actividad cuando hay contracción
+    # Retorna la señal simulada, asegurando que esté dentro del rango ADC (0 a 4095)
+    return max(0, min(4095, 2000 + base_noise + burst))
+
+#  FILTROS 
+def apply_moving(value):             # Filtro de media móvil
+    global mov_buf, mov_sum, mov_pos, mov_count
+    if mov_count < MOVING_WINDOW:    # Si aún no se llena la ventana
+        mov_buf[mov_pos] = value     # Guarda la nueva muestra
+        mov_sum += value             # Suma el nuevo valor
+        mov_count += 1               # Aumenta el contador
+    else:                            # Si la ventana está llena
+        mov_sum -= mov_buf[mov_pos]  # Resta el valor antiguo que se va a reemplazar
+        mov_buf[mov_pos] = value     # Sustituye el valor viejo por el nuevo
+        mov_sum += value             # Suma el nuevo valor
+    mov_pos = (mov_pos + 1) % MOVING_WINDOW  # Avanza la posición circular
+    return mov_sum // mov_count      # Devuelve el promedio entero
+
+def apply_median(value):             # Filtro de mediana
+    global med_buf
+    med_buf.append(value)            # Añade el nuevo valor al buffer
+    if len(med_buf) > MEDIAN_WINDOW: # Si supera el tamaño máximo, elimina el más antiguo
+        med_buf.pop(0)
+    temp = sorted(med_buf)           # Ordena los valores del buffer
+    n = len(temp)                    # Obtiene cuántos elementos hay
+    if n == 0:                       # Si está vacío (caso inicial)
+        return value
+    if n % 2 == 1:                   # Si la cantidad es impar
+        return temp[n//2]            # Devuelve el valor del medio
+    else:                            # Si es par, devuelve el promedio de los dos del medio
+        return (temp[n//2 - 1] + temp[n//2]) // 2
+
+def apply_iir(value):                # Filtro exponencial (IIR)
+    global iir_prev
+    if iir_prev is None:             # Si es la primera muestra
+        iir_prev = value             # Inicializa con el valor actual
+        return value
+    # Calcula nuevo valor filtrado: mezcla entre valor actual y anterior
+    iir_prev = int(IIR_ALPHA * value + (1 - IIR_ALPHA) * iir_prev)
+    return iir_prev                  # Devuelve el valor suavizado
+
+#  CALLBACK 
+def sample_cb(timer):                # Función llamada automáticamente por el temporizador
+    global new_sample, data_ready
+    new_sample = fake_emg()          # Genera una nueva muestra simulada
+    data_ready = True                # Activa la bandera de "nuevo dato listo"
+
+# INICIO 
+print(" EMG modo automático con filtros en cascada ")  # Mensaje de inicio
+print("Muestreo: {} Hz".format(SAMPLE_RATE))           # Muestra la frecuencia de muestreo
+print("Imprimiendo: Crudo, Promedio, Mediana, Exponencial")  # Etiquetas para el formato de salida
+
+timer = Timer(0)                     # Crea un temporizador de hardware
+# Configura el temporizador para ejecutar 'sample_cb' cada periodo (1/250 s)
+timer.init(period=int(1000/SAMPLE_RATE), mode=Timer.PERIODIC, callback=sample_cb)
+led.value(1)                         # Enciende el LED para indicar adquisición activa
+
+#  BUCLE PRINCIPAL
+try:
+    while True:                      # Bucle infinito
+        if data_ready:               # Si hay nueva muestra lista
+            data_ready = False       # Reinicia la bandera
+            raw = new_sample         # Obtiene la muestra cruda
+            avg = apply_moving(raw)  # Aplica filtro de media móvil
+            med = apply_median(avg)  # Aplica filtro de mediana
+            iir = apply_iir(med)     # Aplica filtro exponencial (IIR)
+
+            # Imprime los valores separados por comas (CSV) para graficar en Serial Plotter
+            print("{},{},{},{}".format(raw, avg, med, iir))
+        time.sleep_ms(1)             # Pequeño retardo para no saturar la CPU
+
+except KeyboardInterrupt:            # Si el usuario detiene el programa (Ctrl+C)
+    timer.deinit()                   # Detiene el temporizador
+    led.value(0)                     # Apaga el LED
+    print(" Adquisición detenida.")  # Mensaje final
