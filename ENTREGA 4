@@ -1,0 +1,281 @@
+from machine import Pin, I2C, PWM   # Controla pines, comunicación I2C y señales PWM 
+import time                         # Para  usar retardos y medir el tiempo en el programa
+import ssd1306                      # Para mostrar gráficos o texto en la pantalla
+import framebuf                     # Para dibujar en memoria antes de mostrar en pantalla
+import urandom as random            # Para generar números aleatorios
+
+# --- Pines ---
+Up = Pin(35, Pin.IN, Pin.PULL_DOWN)
+Down = Pin(32, Pin.IN, Pin.PULL_DOWN)
+StrPs = Pin(34, Pin.IN, Pin.PULL_DOWN)
+LedR = Pin(2, Pin.OUT)
+buzzer = Pin(5, Pin.OUT)
+
+# --- Pantalla OLED ---
+i2c = I2C(0, scl=Pin(22), sda=Pin(21), freq=100000)   # frecuencia probada para estabilidad utilizar entre (100k Hz a 50k Hz)
+print("Escaneo de puerto i2c", i2c.scan()) #escanea el puerto i2c del controlador si aparece un numero el puerto funciona bien , si aparece vacio intentar reiniciar
+oled = ssd1306.SSD1306_I2C(128, 64, i2c) #definir el ancho y alto de la pantalla para su comunicacion i2c
+oled.show() #limpiar pantalla despues de 5ms para evitar congelamientos
+time.sleep_ms(5)
+
+# --- Sprite del fantasma (obstáculo) y calavera (jugador)  ---
+fantasma = bytearray([ 
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xf0,
+    0xec,0xe6,0xff,0xff,0xe6,0xec,0xf8,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x03,0x03,0x07,0x03,0x0f,0x03,0x07,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00
+])
+#buffer del documento (crea un objeto grafico con informacion guardada en la memoria)
+#arreglo matricial hecho con image2cpp (Imagen del fantasma )
+fantasma_fb = framebuf.FrameBuffer(fantasma, 23, 23, framebuf.MONO_VLSB)
+
+jugador = bytearray([
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0xc0, 0xc0, 0xe0, 0xe0, 0xe0, 0xe0, 0xe0, 0xe0, 0xe0, 
+	0xe0, 0xc0, 0xc0, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7c, 0xff, 
+	0x87, 0x03, 0x03, 0x03, 0x83, 0x87, 0x7f, 0x7f, 0x87, 0x83, 0x03, 0x03, 0x03, 0x87, 0xff, 0x7c, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x03, 0x02, 0x0f, 0x1e, 0x07, 0x1f, 
+	0x0e, 0x0e, 0x1f, 0x0f, 0x0e, 0x0f, 0x02, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+])
+#arreglo matricial hecho con image2cpp (Imagen de calavera)
+jugador_fb = framebuf.FrameBuffer(jugador, 26, 26, framebuf.MONO_VLSB)
+#buffer del documento (crea un objeto grafico con informacion guardada en la memoria)
+
+
+# --- Variables del juego ---
+
+# --- Hitbox o ancho de colicion ---
+FANTASMA_W = 19
+FANTASMA_H = 19
+PLAYER_W = 15
+PLAYER_H = 10
+
+# --- Variables de inicializacion de juego ---
+modo = 1 #guarda en la variable el modo de juego
+
+jugando = False #Guardan si el juego esta en pausa o reanudado
+pausado = False
+
+player_y = 30 #Posicion vertical del jugador por defecto
+obst_x = 128 #posicion del fantasma en X limite derecho de la pantalla 128px
+obst_y = random.randint(12, 64 - FANTASMA_H - 2) #Posicion del fantasma en Y (utiliza funcion randint para establecer que aparezca en y)
+#un numero entre 12px (para evitar que choque con el texto ) y 64 que es el maximo de la pantalla se le resta el tamaño del fantasma y se le resta 2 para que sea mas variado
+
+puntos = 0 #guarda los puntos
+menu_opcion = 1 #guarda la opcion en el menu de pausa
+
+vidas = 1           #guarda el total de vidas por modo (1 modo hardcore y clasico, infinitas en contra reloj)
+
+velocidad_base = 4.5  # Velocidad inicial del fantasma
+velocidad_max = 15   # Velocidad máxima que alcanzará progresivamente
+incremento_vel = 1  # Cuánto aumenta la velocidad cada frame o cada que un fantasma pase la pantalla 
+
+# --- Antirrebote ---
+ultimo_tiempo = 0 #guarda el ultimo tiempo en que se presiono el boton (o se hizo una interrupcion)
+delay_rebote = 200 #establece el tiempo de antirrebote
+evento_pendiente = None #Guardar temporalmente qué botón se presionó dentro de la interrupción, para procesarlo luego con seguridad en el bucle principal.
+
+
+
+# --- Función de sonido ---
+def beep(freq=1000, dur=100):  #nombre y parametros (frecuencia de la señal, duracion )
+    pwm = PWM(buzzer) #utiliza el modulo PWM para definir anchos de pulsos para producir sonido
+    pwm.freq(freq) #usa la frecuencia guardada en el parametro
+    pwm.duty(512)  #establece el movimiento a utilizar como punto intermedio que es la mitad de 1023 ya que si se coloca 1023 no generara sonido por saturacion
+    time.sleep_ms(dur) #duracion del sonido en ms
+    pwm.deinit()       #apaga el PWM para que deje de emitir sonido
+    time.sleep_ms(10) # evita interferencias I2C
+
+# --- Interrupción ---
+
+#Antirrebote
+def Evento1(p): #detecta si ha pasado un tiempo estimado(delay_rebote)
+    global evento_pendiente, ultimo_tiempo
+    ahora = time.ticks_ms() #detecta cuanto tiempo ha pasado desde que se produjo una interrupcion o presiono un boton en ms
+    if ahora - ultimo_tiempo < delay_rebote:
+        return
+    ultimo_tiempo = ahora #Actualiza el tiempo del último evento con el valor actual (ahora), para la próxima comparación.
+    evento_pendiente = p  #Guarda el pin que generó el evento en la variable global evento_pendiente
+
+#interrupcion 
+Up.irq(trigger=Pin.IRQ_FALLING, handler=Evento1) #indica que la interrupción ocurre cuando el pin pasa de HIGH a LOW, es decir, cuando se presiona el botón 
+Down.irq(trigger=Pin.IRQ_FALLING, handler=Evento1)
+StrPs.irq(trigger=Pin.IRQ_FALLING, handler=Evento1)
+
+# --- Manejar eventos ---
+def manejar_evento(p):  #funcion para el manejo de logica del juego, si el jugador esta en pausa o en el juego
+    global modo, jugando, pausado, player_y, obst_x, obst_y, puntos, menu_opcion  #define variables globales para su uso posterior
+    
+# --- MENU DE INICIO
+    if not jugando: #cuando el jugador esta en el menu de inicio (cuando NO esta jugando)
+        if p is Up: #Cuando se presiona el boton Up se mueve hacia arriba en el menu
+            modo = 3 if modo <= 1 else modo - 1 #si el modo esta en la posicion 1 (clasico) vuelve a la posicion 3 (hardcore) y va restando 1 posicion verticalmente
+            beep(800, 40) #Sonido producido
+        elif p is Down: #Cuando el jugador usa el boton Down se mueve hacia abajo en el menu
+            modo = 1 if modo >= 3 else modo + 1 #sucede lo mismo solo que enves de restar una posicion vertical la suma para que haga el efecto de ir hacia abajo
+            beep(800, 40)
+        elif p is StrPs: #Cuando presione el boton StrPs entrara a jugar colocando la variable como verdadera
+            jugando = True #cambio de variable a verdadera
+            pausado = False #Pausa sigue siendo falsa
+            obst_x = 128 #posicion en X del obstaculo (FANTASMA)
+            obst_y = random.randint(12, 64 - FANTASMA_H - 2) #misma funcion para que el fantasma sea aleatorio en Y
+            puntos = 0 #puntos por defecto 0
+            beep(300, 120)
+            
+# --- MIENTRAS SE JUEGA Y NO ESTA PAUSADO
+
+    elif jugando and not pausado:
+        if p is Up and player_y > 8: #Cuando se presiona Up (como interrupcion es p) y el jugador no esta en el tope superior de la pantalla (>8px)
+            player_y -= 5            #El jugador se mueve a una razon de -5 px (hacia arriba en Y)
+            beep(800, 30)
+        elif p is Down and player_y < 50: #Cuando se presiona DOWN (como interrupcion es p) y el jugador no esta en el tope inferior de la pantalla (<50px)
+            player_y += 5            #El jugador se mueve a una razon de 5 px (hacia abajo en Y)
+            beep(500, 30)
+        elif p is StrPs:             #Si ocurre la interrupcion al presionar el boton StrPs cambia el estado a pausada
+            pausado = True
+            menu_opcion = 1          #Ejecuta la opcion de menu #1 que es el menu de pausa
+            beep(400, 60)
+            
+# --- MIENTRAS EL JUEGO ESTA EN PAUSA
+
+    elif pausado: 
+        if p is Up or p is Down:     #Mismo principio pasado cambia las opciones del menu entre 1 y 2 en vertical para elejir Salir y Continuar
+            menu_opcion = 1 if menu_opcion == 2 else 2
+            beep(700, 30)
+        #ademas si se vuelve a presionar el boton StrPS cambia la opcion dependiendo de su posicion
+        elif p is StrPs:
+            if menu_opcion == 1: #si esta en la posicion 1 continua el juego (deja de estar pausado) 
+                pausado = False
+                beep(1000, 40)
+            else:
+                jugando = False  #si esta en la posicion 2 deja de estar pausado pero tambien deja de estar "jugando" volviendo al menu principal modo 1
+                pausado = False
+                modo = 1
+                beep(200, 100)
+
+# --- Funciones para dibujar/borrar sprites (borra y dibuja a los personajes) ---
+
+def dibujar_jugador(x, y): #Recorre un cuadro de 26x26 píxeles, que corresponde al tamaño del sprite (imagen) del jugador.
+    for i in range(26):  #se usa un for en otro for por que corresponde a un arreglo de columnas y filas en forma de pixeles
+        for j in range(26):
+            if jugador_fb.pixel(i, j): #compara si tiene un pixel activo en alguna de sus posiciones (x, y del arreglo), Si si es asi pasa a dibujarlo en la pantalla 
+                oled.pixel(x + i, y + j, 1) #Indica el en que lugar de la pantalla se va a desplazar y si tiene un pixel en arreglo, se interpreta como 1 para encenderlo en la pantalla oled
+
+def borrar_jugador(x, y):
+    for i in range(26):
+        for j in range(26):
+            if jugador_fb.pixel(i, j):
+                oled.pixel(x + i, y + j, 0)  #Mismo proceso pasado pero en este caso como se quiere apagar se establece el 0 de apagado en la pantalla 
+
+def dibujar_fantasma(x, y):  #Mismo proceso que con el jugador pero para el fantasma, solo que esta vez se usa el ancho y alto de la hitbox del fantasma para evitar confundirse en el juego
+    for i in range(FANTASMA_W):
+        for j in range(FANTASMA_H):
+            if fantasma_fb.pixel(i, j):
+                oled.pixel(x + i, y + j, 1)
+
+def borrar_fantasma(x, y):
+    for i in range(FANTASMA_W):
+        for j in range(FANTASMA_H):
+            if fantasma_fb.pixel(i, j):
+                oled.pixel(x + i, y + j, 0)
+                
+
+# --- Bucle principal ---
+old_player_y = player_y       # Guarda la posición anterior del jugador en Y para poder comparar si se movió.
+old_obst_x = obst_x           # Guarda la posición anterior del obstáculo (fantasma) en X.
+old_obst_y = obst_y           # Guarda la posición anterior del obstáculo (fantasma) en Y.
+
+# Tiempo para modo Contra-tiempo
+tiempo_total = 60  # segundos  # Define que el modo Contra-tiempo dura 60 segundos.
+tiempo_inicio = None           # Se inicializa sin valor; se llenará cuando empiece el juego.
+
+# Velocidad dinámica para Clásico y Hardcore
+velocidad = velocidad_base     # Se inicia la velocidad del juego con el valor base.
+
+# Bucle principal donde corre el juego y se ejecutan las funciones
+while True:                    # Es el bucle infinito que mantiene el juego en ejecución.
+    if evento_pendiente:       # Si hay un evento (por ejemplo, presionar un botón)...
+        manejar_evento(evento_pendiente)  # Se llama la función que maneja ese evento.
+        evento_pendiente = None            # Luego se limpia para evitar que se repita.
+    oled.fill(0)               # Limpia toda la pantalla OLED antes de dibujar algo nuevo.
+    
+    # La función oled.text tiene 3 argumentos: (texto, posición en x, posición en y)
+    if not jugando:            # Si no se está jugando, significa que estamos en el menú principal.
+        oled.text("Selecciona modo:", 0, 0)  # Muestra el título del menú en la pantalla.
+        modos = ["Clasico", "Contra-tiempo", "Hardcore"]  # Lista con los tres modos de juego.
+        for i, nombre in enumerate(modos, 1):             # Recorre los modos uno por uno.
+            prefijo = ">" if modo == i else " "           # Si el modo está seleccionado, le pone un “>” al lado.
+            oled.text(f"{prefijo} {nombre}", 5, 10 + i * 10)  # Muestra los nombres alineados verticalmente.
+
+        # Reiniciar variables según modo
+        if modo == 2:            # Si el modo seleccionado es el Contra-tiempo...
+            tiempo_inicio = None # Se reinicia el tiempo para comenzar desde cero.
+        velocidad = velocidad_base  # Se restaura la velocidad base del juego.
+        puntos = 0                # Se reinicia el contador de puntos a cero.
+
+    elif jugando and not pausado:  # Si el jugador está jugando y el juego no está en pausa...
+        dibujar_jugador(0, player_y - 10)  # Dibuja al jugador en su posición actual.
+        dibujar_fantasma(obst_x, obst_y)   # Dibuja el obstáculo (fantasma) en su posición actual.
+
+        # --- Lógica de velocidad según modo ---
+        if modo == 1:  # Clasico
+            velocidad = min(velocidad_base + puntos * incremento_vel, velocidad_max)  # Aumenta la velocidad poco a poco hasta un límite máximo.
+        elif modo == 2:  # Contra-tiempo
+            velocidad = velocidad_base + puntos * incremento_vel   # La velocidad aumenta sin límite.
+            if tiempo_inicio is None:
+                tiempo_inicio = time.ticks_ms()  # Registra el momento exacto en que empieza el juego.
+            tiempo_transcurrido = (time.ticks_ms() - tiempo_inicio) // 1000  # Calcula cuántos segundos han pasado desde que inició.
+            tiempo_restante = max(tiempo_total - tiempo_transcurrido, 0)     # Calcula cuántos segundos quedan y evita que sea negativo.
+            oled.text(f"{tiempo_restante}s", 28, 0)  # Muestra el tiempo restante en pantalla.
+            if tiempo_restante == 0:  # Si se acabó el tiempo...
+                jugando = False        # Termina la partida.
+                beep(200, 300)         # Suena un pitido indicando que terminó.
+                oled.fill(0)           # Limpia la pantalla.
+                oled.text("TIEMPO AGOTADO!", 10, 20)  # Muestra mensaje de fin.
+                oled.text(f"Puntaje: {puntos}", 10, 40)  # Muestra los puntos obtenidos.
+                oled.show()            # Actualiza la pantalla con el mensaje.
+                time.sleep(2)          # Espera 2 segundos antes de volver al menú.
+                tiempo_restante = tiempo_total  # Reinicia el tiempo para la próxima partida.
+        elif modo == 3:  # Hardcore
+            velocidad = min(velocidad_base + puntos * incremento_vel * 2, velocidad_max)  # Aumenta la velocidad el doble de rápido.
+
+        # Mover obstáculo
+        obst_x -= int(velocidad)  # Hace que el obstáculo se mueva hacia la izquierda según la velocidad.
+        if obst_x < -36:          # Si el obstáculo sale de la pantalla...
+            obst_x = 128          # Lo reinicia en el borde derecho para que vuelva a aparecer.
+            obst_y = random.randint(12, 64 - FANTASMA_H - 2)  # Le da una nueva posición vertical aleatoria.
+            if modo in [1,2,3]:   # En cualquier modo de juego...
+                puntos += 1       # Suma un punto cada vez que se esquiva un obstáculo.
+                beep(1200, 50)    # Suena un beep corto de confirmación.
+
+        # --- Colisiones en cada modo de juego ---
+        colision = (2 < obst_x + FANTASMA_W and 2 + PLAYER_W > obst_x) and \
+                   (player_y < obst_y + FANTASMA_H and player_y + PLAYER_H > obst_y)  # Detecta si el jugador y el fantasma chocan (colisión de cajas).
+
+        if colision:
+            if modo == 1 or modo == 3:  # En Clásico o Hardcore: el juego termina al chocar.
+                jugando = False
+                LedR.value(1)            # Enciende el LED rojo indicando “Game Over”.
+                beep(200, 300)           # Emite un sonido grave de fin.
+                oled.fill(0)
+                oled.text("GAME OVER!", 20, 20)  # Muestra mensaje de fin del juego.
+                oled.text(f"Puntaje: {puntos}", 10, 40)
+                oled.show()
+                time.sleep(2)
+                LedR.value(0)            # Apaga el LED rojo.
+                modo = 1                 # Vuelve al modo clásico por defecto.
+            elif modo == 2:  # En Contra-tiempo, las colisiones no terminan el juego.
+                obst_x = 128             # Se reinicia el obstáculo desde la derecha.
+                obst_y = random.randint(12, 64 - FANTASMA_H - 2)  # Cambia su posición vertical.
+                beep(450, 300)           # Emite un beep indicando la colisión.
+        oled.text(f"Puntos:{puntos}", 55, 0)  # Muestra el puntaje actual en la esquina superior derecha.
+
+    elif pausado:  # Si el juego está pausado...
+        oled.text("== PAUSA ==", 30, 10)                     # Muestra el título de pausa.
+        oled.text(("> Continuar" if menu_opcion == 1 else "  Continuar"), 10, 30)  # Opción para continuar.
+        oled.text(("> Salir" if menu_opcion == 2 else "  Salir"), 10, 45)          # Opción para salir.
+
+    oled.show()                    # Refresca la pantalla OLED para mostrar todos los cambios.
+    time.sleep_ms(50)              # Espera 50 milisegundos antes de actualizar, para evitar que el juego se congele o se acelere demasiado.
